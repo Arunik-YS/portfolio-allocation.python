@@ -14,38 +14,48 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# 2. 실시간 가격 가져오기 (Streamlit Cloud IP 차단 우회 적용)
+# 2. 실시간 가격 및 종목명 가져오기 (이름 표시 복구 및 차단 우회)
 @st.cache_data(show_spinner=False)
 def get_stock_info(ticker):
     try:
-        # yf.Ticker 대신 yf.download를 사용해 IP 차단 확률을 대폭 낮춥니다.
-        # period="5d"를 주어 주말/휴장일이 끼어있어도 안정적으로 데이터를 가져옵니다.
+        # 1단계: yf.download로 안전하게 최근 종가 가져오기
         df = yf.download(ticker, period="5d", progress=False)
         if df.empty:
             return None, None
         
-        # yfinance 버전이나 단일/다중 티커 조회에 따라 컬럼 구조(MultiIndex)가 다를 수 있어 이를 분기 처리합니다.
+        # 다중 인덱스 여부에 따른 종가 추출
         if isinstance(df.columns, pd.MultiIndex):
             price = float(df['Close'][ticker].iloc[-1])
         else:
             price = float(df['Close'].iloc[-1])
             
-        # 종목명은 입력한 티커를 그대로 사용합니다 (종목명 조회를 위한 추가 API 호출 방지)
-        return ticker, price
-    except Exception as e:
-        return None, None
-        
-        price = float(hist['Close'].iloc[-1])
-        # info에서 이름을 가져오되, 실패하면 입력한 티커를 그대로 사용
-        name = stock.info.get('shortName', stock.info.get('longName', ticker))
+        # 2단계: 종목명(Name) 가져오기 시도
+        try:
+            stock = yf.Ticker(ticker)
+            # shortName이 없으면 longName, 둘 다 없으면 ticker를 반환
+            name = stock.info.get('shortName', stock.info.get('longName', ticker))
+        except:
+            # IP 차단 등으로 info 조회가 막히면 멈추지 않고 티커를 이름 대신 사용
+            name = ticker 
+            
         return name, price
     except Exception as e:
         return None, None
 
-# 3. 과거 3개월 데이터 가져오기
+# 3. 과거 3개월 데이터 가져오기 (KeyError 오류 해결)
 @st.cache_data(show_spinner=False)
 def fetch_history(tickers):
-    data = yf.download(tickers, period="3mo")['Adj Close']
+    # 'Adj Close' 대신 오류가 없는 일반 종가 'Close'를 명시적으로 사용
+    df = yf.download(tickers, period="3mo", progress=False)
+    
+    # yfinance 버전 및 종목 수에 따라 컬럼 구조가 다르므로 안전하게 분기 처리
+    if isinstance(df.columns, pd.MultiIndex):
+        # 여러 종목일 경우 MultiIndex에서 'Close' 그룹만 추출
+        data = df['Close']
+    else:
+        # 혹시 단일 종목 처리 등 예외 상황일 경우
+        data = df[['Close']]
+        
     return data
 
 # 4. 포트폴리오 연산 로직
