@@ -4,94 +4,132 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
 
-# 1. 모바일 친화적 페이지 설정 (좌우 여백을 통제하여 모바일 핏 맞춤)
-st.set_page_config(page_title="Portfolio Optimizer", layout="centered")
+# 페이지 설정
+st.set_page_config(page_title="주식 최적 배분 계산기", layout="centered")
 
-# 2. 데이터 수집 함수 (캐싱을 통해 모바일 로딩 속도 최적화)
+# CSS를 활용해 모바일에서 입력 칸 간격 조정
+st.markdown("""
+    <style>
+    .stNumberInput, .stTextInput { margin-bottom: -15px; }
+    </style>
+    """, unsafe_allow_html=True)
+
 @st.cache_data(show_spinner=False)
-def fetch_data(tickers, period="3mo"):
-    # yfinance를 통해 수정종가(Adj Close) 데이터 다운로드
-    data = yf.download(tickers, period=period)['Adj Close']
+def get_stock_info(ticker):
+    try:
+        stock = yf.Ticker(ticker)
+        # 실시간 가격 및 종목명 가져오기
+        fast_info = stock.fast_info
+        price = fast_info['last_price']
+        name = stock.info.get('longName', ticker)
+        return name, price
+    except:
+        return None, None
+
+@st.cache_data(show_spinner=False)
+def fetch_history(tickers):
+    data = yf.download(tickers, period="3mo")['Adj Close']
     return data
 
-# 3. 포트폴리오 성과 계산 (수익률, 표준편차, 샤프지수)
+# 포트폴리오 연산 로직 (이전과 동일)
 def portfolio_performance(weights, mean_returns, cov_matrix, risk_free_rate):
-    # 영업일 기준 252일을 곱해 연환산(Annualized) 수치 도출
     returns = np.sum(mean_returns * weights) * 252
     std_dev = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights))) * np.sqrt(252)
     sharpe_ratio = (returns - risk_free_rate) / std_dev
     return returns, std_dev, sharpe_ratio
 
-# 4. 목적함수 (샤프지수를 최대화하기 위해 음의 샤프지수를 최소화)
 def negative_sharpe(weights, mean_returns, cov_matrix, risk_free_rate):
     return -portfolio_performance(weights, mean_returns, cov_matrix, risk_free_rate)[2]
 
-# 5. 최적화 실행 함수 (SLSQP 알고리즘)
-def maximize_sharpe_ratio(mean_returns, cov_matrix, risk_free_rate):
-    num_assets = len(mean_returns)
-    args = (mean_returns, cov_matrix, risk_free_rate)
-    
-    # 제약조건: 모든 종목 비중의 합은 1 (100%)
-    constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1})
-    # 각 종목의 비중 범위: 0.0 ~ 1.0 (공매도 금지)
-    bounds = tuple((0, 1) for _ in range(num_assets))
-    
-    # 초기값: 모든 종목에 동일한 비중으로 분산 투자
-    init_guess = num_assets * [1. / num_assets,]
-    
-    result = minimize(negative_sharpe, init_guess, args=args,
-                      method='SLSQP', bounds=bounds, constraints=constraints)
-    return result
+# --- UI 시작 ---
+st.title("⚖️ 포트폴리오 리밸런싱")
 
-# ==========================================
-# 모바일 UI / UX 렌더링 파트
-# ==========================================
-st.title("📈 최적 배분 계산기")
+# 1. 티커 및 보유 주수 입력 섹션
+st.subheader("🔍 보유 종목 입력")
+tickers_input = []
+shares_input = []
+current_values = []
+current_prices = []
 
-# 모바일 화면을 고려해 Expander(접기/펴기) 활용하여 공간 절약
-with st.expander("⚙️ 분석 설정", expanded=True):
-    # 입력이 편하도록 기본값으로 모니터링하시는 ETF 세팅
-    default_tickers = ["TQQQ", "KORU", "SGOV"]
-    user_input = st.text_input("티커 입력 (쉼표로 구분)", value=", ".join(default_tickers))
+# 5개의 입력 칸 생성
+for i in range(5):
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        t = st.text_input(f"티커 {i+1}", key=f"t{i}", placeholder="예: TQQQ").upper().strip()
+    with col2:
+        s = st.number_input(f"현재 주수", key=f"s{i}", min_value=0, step=1)
     
-    # 국고채 3년물 등 무위험수익률 (기본값 3.0%)
-    risk_free_input = st.number_input("무위험수익률 (%)", value=3.0, step=0.1) / 100
+    if t:
+        name, price = get_stock_info(t)
+        if price:
+            eval_amount = price * s
+            st.caption(f"📍 {name} | 현재가: ${price:.2f} | 평가금: ${eval_amount:,.2f}")
+            tickers_input.append(t)
+            shares_input.append(s)
+            current_prices.append(price)
+            current_values.append(eval_amount)
+        else:
+            st.caption("⚠️ 유효하지 않은 티커입니다.")
 
-tickers = [ticker.strip().upper() for ticker in user_input.split(",") if ticker.strip()]
+st.divider()
 
-if st.button("최적 비중 계산하기", use_container_width=True): # 버튼을 화면 너비에 꽉 차게 (모바일 터치 최적화)
-    if len(tickers) < 2 or len(tickers) > 5:
-        st.warning("티커는 최소 2개에서 최대 5개까지 입력해주세요.")
+# 2. 투자금액 설정 섹션
+st.subheader("💰 자금 설정")
+total_eval = sum(current_values)
+st.metric("현재 총 평가금액", f"${total_eval:,.2f}")
+
+add_cash = st.number_input("추가 투자 금액 ($)", min_value=0, value=0, step=100)
+total_budget = total_eval + add_cash
+st.info(f"계산 기준 총 금액 (평가금 + 추가금): **${total_budget:,.2f}**")
+
+# 3. 분석 실행
+risk_free_rate = 0.03 # 국고채 3년물 가정 (3%)
+
+if st.button("🚀 최적 배분 시뮬레이션 실행", use_container_width=True):
+    if len(tickers_input) < 2:
+        st.error("분석을 위해 최소 2개 이상의 유효한 티커가 필요합니다.")
     else:
-        with st.spinner("데이터를 분석 중입니다..."):
-            # 데이터 로드 및 전처리
-            data = fetch_data(tickers)
-            
-            # 일간 로그수익률 계산
-            log_returns = np.log(data / data.shift(1)).dropna()
-            
-            # 평균 수익률 및 공분산 행렬 계산
+        with st.spinner("과거 데이터를 분석하고 최적 비중을 계산 중입니다..."):
+            # 데이터 수집 및 연산
+            history = fetch_history(tickers_input)
+            log_returns = np.log(history / history.shift(1)).dropna()
             mean_returns = log_returns.mean()
             cov_matrix = log_returns.cov()
             
-            # 최적화 수행
-            opt_result = maximize_sharpe_ratio(mean_returns, cov_matrix, risk_free_input)
+            # 최적화 (Sharpe 최대화)
+            num_assets = len(tickers_input)
+            constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1})
+            bounds = tuple((0, 1) for _ in range(num_assets))
+            init_guess = num_assets * [1. / num_assets,]
             
-            # 결과 도출
-            opt_weights = opt_result.x
-            opt_ret, opt_std, opt_sharpe = portfolio_performance(opt_weights, mean_returns, cov_matrix, risk_free_input)
+            opt_result = minimize(negative_sharpe, init_guess, 
+                                  args=(mean_returns, cov_matrix, risk_free_rate),
+                                  method='SLSQP', bounds=bounds, constraints=constraints)
             
-            # UI 출력 (모바일 가독성을 위해 상하 배치)
-            st.success("✅ 최적화 완료!")
+            weights = opt_result.x
             
-            st.subheader("🏆 최대 샤프지수 포트폴리오")
-            st.metric(label="예상 연환산 수익률", value=f"{opt_ret * 100:.2f}%")
-            st.metric(label="예상 연환산 변동성", value=f"{opt_std * 100:.2f}%")
-            st.metric(label="샤프지수", value=f"{opt_sharpe:.2f}")
+            # 4. 결과 출력
+            st.success("분석 완료!")
             
-            st.divider()
+            # 종목별 결과 리스트
+            results_data = []
+            for i in range(len(tickers_input)):
+                target_amount = total_budget * weights[i]
+                target_shares = target_amount / current_prices[i]
+                diff_shares = target_shares - shares_input[i]
+                
+                results_data.append({
+                    "티커": tickers_input[i],
+                    "최적 비중": f"{weights[i]*100:.1f}%",
+                    "목표 주수": f"{target_shares:.2f}주",
+                    "매수 필요": f"{max(0, diff_shares):.2f}주"
+                })
             
-            st.subheader("⚖️ 종목별 최적 투자 비중")
-            # 비중 결과를 DataFrame으로 변환 후 시각화
-            weight_df = pd.DataFrame({"비중 (%)": np.round(opt_weights * 100, 2)}, index=tickers)
-            st.dataframe(weight_df, use_container_width=True)
+            st.subheader("📊 종목별 매수 가이드")
+            st.table(pd.DataFrame(results_data))
+            
+            # 포트폴리오 성과 수치
+            ret, std, sharpe = portfolio_performance(weights, mean_returns, cov_matrix, risk_free_rate)
+            cols = st.columns(2)
+            cols[0].metric("예상 수익률", f"{ret*100:.2f}%")
+            cols[1].metric("샤프 지수", f"{sharpe:.2f}")
