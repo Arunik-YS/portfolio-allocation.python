@@ -14,15 +14,26 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# 2. 실시간 가격 가져오기 (버그 수정됨)
+# 2. 실시간 가격 가져오기 (Streamlit Cloud IP 차단 우회 적용)
 @st.cache_data(show_spinner=False)
 def get_stock_info(ticker):
     try:
-        stock = yf.Ticker(ticker)
-        # fast_info 대신 가장 안정적인 최근 1일(1d) 데이터의 종가를 가져옵니다.
-        hist = stock.history(period="1d")
-        if hist.empty:
+        # yf.Ticker 대신 yf.download를 사용해 IP 차단 확률을 대폭 낮춥니다.
+        # period="5d"를 주어 주말/휴장일이 끼어있어도 안정적으로 데이터를 가져옵니다.
+        df = yf.download(ticker, period="5d", progress=False)
+        if df.empty:
             return None, None
+        
+        # yfinance 버전이나 단일/다중 티커 조회에 따라 컬럼 구조(MultiIndex)가 다를 수 있어 이를 분기 처리합니다.
+        if isinstance(df.columns, pd.MultiIndex):
+            price = float(df['Close'][ticker].iloc[-1])
+        else:
+            price = float(df['Close'].iloc[-1])
+            
+        # 종목명은 입력한 티커를 그대로 사용합니다 (종목명 조회를 위한 추가 API 호출 방지)
+        return ticker, price
+    except Exception as e:
+        return None, None
         
         price = float(hist['Close'].iloc[-1])
         # info에서 이름을 가져오되, 실패하면 입력한 티커를 그대로 사용
@@ -112,7 +123,11 @@ if st.button("🚀 최적 배분 시뮬레이션 실행", use_container_width=Tr
             
             num_assets = len(tickers_input)
             constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1})
-            bounds = tuple((0, 1) for _ in range(num_assets))
+            
+            # 수정: 모든 종목 최소 15%(0.15) ~ 최대 100%(1.0) 제한
+            min_weight = 0.15 
+            bounds = tuple((min_weight, 1.0) for _ in range(num_assets)) 
+            
             init_guess = num_assets * [1. / num_assets,]
             
             opt_result = minimize(negative_sharpe, init_guess, 
