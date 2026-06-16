@@ -4,171 +4,142 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
 
-# 1. 페이지 설정
-st.set_page_config(page_title="주식 최적 배분 계산기", layout="centered")
+st.set_page_config(page_title="장기 황금 비중 진단기", layout="centered")
+st.markdown("<style>.stNumberInput, .stTextInput { margin-bottom: -15px; }</style>", unsafe_allow_html=True)
 
-# 모바일 UI 최적화를 위한 CSS (입력창 하단 여백 조정)
-st.markdown("""
-    <style>
-    .stNumberInput, .stTextInput { margin-bottom: -15px; }
-    </style>
-    """, unsafe_allow_html=True)
+# 자산군 고정
+TARGET_TICKERS = ["VOO", "TLT", "IAU"]
+RISK_FREE_RATE = 0.03 # 무위험수익률 3%
 
-# 2. 실시간 가격 및 종목명 가져오기 (이름 표시 복구 및 차단 우회)
+# 1. 10년치 장기 데이터 수집 (황금 비중 산출용)
 @st.cache_data(show_spinner=False)
-def get_stock_info(ticker):
-    try:
-        # 1단계: yf.download로 안전하게 최근 종가 가져오기
-        df = yf.download(ticker, period="5d", progress=False)
-        if df.empty:
-            return None, None
-        
-        # 다중 인덱스 여부에 따른 종가 추출
-        if isinstance(df.columns, pd.MultiIndex):
-            price = float(df['Close'][ticker].iloc[-1])
-        else:
-            price = float(df['Close'].iloc[-1])
-            
-        # 2단계: 종목명(Name) 가져오기 시도
-        try:
-            stock = yf.Ticker(ticker)
-            # shortName이 없으면 longName, 둘 다 없으면 ticker를 반환
-            name = stock.info.get('shortName', stock.info.get('longName', ticker))
-        except:
-            # IP 차단 등으로 info 조회가 막히면 멈추지 않고 티커를 이름 대신 사용
-            name = ticker 
-            
-        return name, price
-    except Exception as e:
-        return None, None
-
-# 3. 과거 3개월 데이터 가져오기 (KeyError 오류 해결)
-@st.cache_data(show_spinner=False)
-def fetch_history(tickers):
-    # 'Adj Close' 대신 오류가 없는 일반 종가 'Close'를 명시적으로 사용
-    df = yf.download(tickers, period="3mo", progress=False)
-    
-    # yfinance 버전 및 종목 수에 따라 컬럼 구조가 다르므로 안전하게 분기 처리
+def fetch_long_term_data():
+    df = yf.download(TARGET_TICKERS, period="10y", progress=False)
     if isinstance(df.columns, pd.MultiIndex):
-        # 여러 종목일 경우 MultiIndex에서 'Close' 그룹만 추출
-        data = df['Close']
+        return df['Close'].dropna()
     else:
-        # 혹시 단일 종목 처리 등 예외 상황일 경우
-        data = df[['Close']]
-        
-    return data
+        return df[['Close']].dropna()
 
-# 4. 포트폴리오 연산 로직
-def portfolio_performance(weights, mean_returns, cov_matrix, risk_free_rate):
+# 2. 최근 5일 데이터로 현재가 가져오기 (IP 차단 우회)
+@st.cache_data(show_spinner=False)
+def get_current_prices():
+    prices = {}
+    df = yf.download(TARGET_TICKERS, period="5d", progress=False)
+    for ticker in TARGET_TICKERS:
+        if isinstance(df.columns, pd.MultiIndex):
+            prices[ticker] = float(df['Close'][ticker].iloc[-1])
+        else:
+            prices[ticker] = float(df['Close'].iloc[-1])
+    return prices
+
+# 3. 포트폴리오 연산 로직
+def portfolio_performance(weights, mean_returns, cov_matrix):
     returns = np.sum(mean_returns * weights) * 252
     std_dev = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights))) * np.sqrt(252)
-    sharpe_ratio = (returns - risk_free_rate) / std_dev
-    return returns, std_dev, sharpe_ratio
+    return returns, std_dev, (returns - RISK_FREE_RATE) / std_dev
 
-def negative_sharpe(weights, mean_returns, cov_matrix, risk_free_rate):
-    return -portfolio_performance(weights, mean_returns, cov_matrix, risk_free_rate)[2]
+def negative_sharpe(weights, mean_returns, cov_matrix):
+    return -portfolio_performance(weights, mean_returns, cov_matrix)[2]
+
+# --- 황금 비중 백그라운드 계산 ---
+with st.spinner("과거 10년간의 데이터를 분석하여 최적의 황금 비중을 계산 중입니다..."):
+    history_10y = fetch_long_term_data()
+    log_returns = np.log(history_10y / history_10y.shift(1)).dropna()
+    mean_returns = log_returns.mean()
+    cov_matrix = log_returns.cov()
+    
+    num_assets = len(TARGET_TICKERS)
+    # 최소 10% 이상 편입하여 극단적 쏠림 방지
+    bounds = tuple((0.1, 1.0) for _ in range(num_assets)) 
+    constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1})
+    
+    opt_result = minimize(negative_sharpe, num_assets * [1./num_assets], 
+                          args=(mean_returns, cov_matrix),
+                          method='SLSQP', bounds=bounds, constraints=constraints)
+    
+    # 계산된 최적 비중 딕셔너리
+    optimal_weights = {TARGET_TICKERS[i]: opt_result.x[i] for i in range(num_assets)}
+    current_prices = get_current_prices()
 
 # ==========================================
-# UI 렌더링 시작
+# UI 렌더링
 # ==========================================
-st.title("⚖️ 포트폴리오 리밸런싱")
+st.title("🛡️ 장기 자산 배분 진단기")
+st.caption("VOO(주식), TLT(장기채), IAU(금) 조합의 10년 백테스트 기반 리밸런싱")
 
-st.subheader("🔍 보유 종목 입력")
-tickers_input = []
-shares_input = []
-current_values = []
-current_prices = []
-
-# 5. 티커와 주수 묶음 처리 (가시성 향상)
-for i in range(5):
-    # container(border=True)를 사용하여 입력칸들을 카드 형태로 박스 처리합니다.
-    with st.container(border=True):
-        col1, col2 = st.columns([1, 1])
-        with col1:
-            t = st.text_input(f"종목 {i+1} 티커", key=f"t{i}", placeholder="예: TQQQ").upper().strip()
-        with col2:
-            s = st.number_input(f"보유 주수 (주)", key=f"s{i}", min_value=0, step=1)
-        
-        if t:
-            name, price = get_stock_info(t)
-            if price:
-                eval_amount = price * s
-                # 정보 텍스트를 카드 하단에 깔끔하게 표시
-                st.info(f"📍 **{name}** | 현재가: ${price:.2f} | 평가금: **${eval_amount:,.2f}**")
-                
-                tickers_input.append(t)
-                shares_input.append(s)
-                current_prices.append(price)
-                current_values.append(eval_amount)
-            else:
-                st.error("⚠️ 데이터를 불러올 수 없는 티커입니다.")
+# 1. 황금 비중 안내
+st.subheader("🎯 10년 최적화 타겟 비중")
+st.info("시장의 단기 노이즈를 무시하고 평생 유지해야 할 전략적 목표 비중입니다.")
+col_w1, col_w2, col_w3 = st.columns(3)
+col_w1.metric("VOO (S&P 500)", f"{optimal_weights['VOO']*100:.1f}%")
+col_w2.metric("TLT (미 장기채)", f"{optimal_weights['TLT']*100:.1f}%")
+col_w3.metric("IAU (금)", f"{optimal_weights['IAU']*100:.1f}%")
 
 st.divider()
 
-# 6. 투자금액 설정 섹션
-st.subheader("💰 자금 설정")
-total_eval = sum(current_values)
+# 2. 내 계좌 입력
+st.subheader("💼 현재 내 계좌 상태 입력")
+shares_input = {}
+with st.container(border=True):
+    cols = st.columns(3)
+    for i, ticker in enumerate(TARGET_TICKERS):
+        with cols[i]:
+            shares_input[ticker] = st.number_input(f"{ticker} 보유 주수", min_value=0, step=1, key=f"s_{ticker}")
+            st.caption(f"현재가: ${current_prices[ticker]:.2f}")
 
-colA, colB = st.columns(2)
-with colA:
-    st.metric("현재 총 평가금액", f"${total_eval:,.2f}")
-with colB:
-    add_cash = st.number_input("추가 투자 금액 ($)", min_value=0.0, value=0.0, step=100.0)
+add_cash = st.number_input("💵 리밸런싱에 투입할 추가 현금 ($)", min_value=0.0, step=100.0)
 
-total_budget = total_eval + add_cash
-st.success(f"총 가용 자산 (평가금 + 추가금): **${total_budget:,.2f}**")
-
-# 7. 분석 실행
-risk_free_rate = 0.03 # 무위험수익률 3% 가정
-
-if st.button("🚀 최적 배분 시뮬레이션 실행", use_container_width=True, type="primary"):
-    if len(tickers_input) < 2:
-        st.warning("분석을 위해 최소 2개 이상의 유효한 티커를 입력해주세요.")
+# 3. 진단 및 리밸런싱 실행
+if st.button("내 포트폴리오 진단하기", use_container_width=True, type="primary"):
+    # 현재 자산 가치 계산
+    current_values = {t: shares_input[t] * current_prices[t] for t in TARGET_TICKERS}
+    total_eval = sum(current_values.values())
+    total_budget = total_eval + add_cash
+    
+    if total_budget == 0:
+        st.warning("보유 주수나 추가 현금을 입력해주세요.")
     else:
-        with st.spinner("과거 데이터를 분석하고 최적 비중을 계산 중입니다..."):
-            history = fetch_history(tickers_input)
-            log_returns = np.log(history / history.shift(1)).dropna()
-            mean_returns = log_returns.mean()
-            cov_matrix = log_returns.cov()
+        st.subheader("📊 리밸런싱 처방전")
+        
+        results = []
+        needs_rebalancing = False
+        
+        for t in TARGET_TICKERS:
+            # 현재 비중 및 목표 계산
+            curr_weight = current_values[t] / total_budget if total_budget > 0 else 0
+            target_weight = optimal_weights[t]
+            weight_diff = curr_weight - target_weight
             
-            num_assets = len(tickers_input)
-            constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1})
+            target_value = total_budget * target_weight
+            target_shares = target_value / current_prices[t]
+            share_diff = target_shares - shares_input[t]
             
-            # 수정: 모든 종목 최소 15%(0.15) ~ 최대 100%(1.0) 제한
-            min_weight = 0.15 
-            bounds = tuple((min_weight, 1.0) for _ in range(num_assets)) 
-            
-            init_guess = num_assets * [1. / num_assets,]
-            
-            opt_result = minimize(negative_sharpe, init_guess, 
-                                  args=(mean_returns, cov_matrix, risk_free_rate),
-                                  method='SLSQP', bounds=bounds, constraints=constraints)
-            
-            weights = opt_result.x
-            
-            # 결과 출력
-            st.subheader("📊 종목별 매수 가이드")
-            
-            results_data = []
-            for i in range(len(tickers_input)):
-                target_amount = total_budget * weights[i]
-                target_shares = target_amount / current_prices[i]
-                diff_shares = target_shares - shares_input[i]
+            # ±5% 밴드 이탈 여부 확인
+            is_out_of_band = abs(weight_diff) >= 0.05
+            if is_out_of_band:
+                needs_rebalancing = True
                 
-                results_data.append({
-                    "티커": tickers_input[i],
-                    "최적 비중": f"{weights[i]*100:.1f}%",
-                    "목표 주수": f"{target_shares:.2f}주",
-                    "매수 필요": f"{max(0, diff_shares):.2f}주"
-                })
-            
-            # 테이블 가시성을 위해 Dataframe 활용
-            st.dataframe(pd.DataFrame(results_data), use_container_width=True, hide_index=True)
-            
-            st.subheader("📈 포트폴리오 예상 성과")
-            ret, std, sharpe = portfolio_performance(weights, mean_returns, cov_matrix, risk_free_rate)
-            
-            pc1, pc2, pc3 = st.columns(3)
-            pc1.metric("연환산 수익률", f"{ret*100:.2f}%")
-            pc2.metric("연환산 변동성", f"{std*100:.2f}%")
-            pc3.metric("샤프 지수", f"{sharpe:.2f}")
+            # 액션 플랜 결정
+            if share_diff > 0.5:
+                action = f"🟢 {int(share_diff)}주 매수"
+            elif share_diff < -0.5:
+                action = f"🔴 {int(abs(share_diff))}주 매도"
+            else:
+                action = "⚪ 유지"
+
+            results.append({
+                "종목": t,
+                "현재 비중": f"{curr_weight*100:.1f}%",
+                "목표 비중": f"{target_weight*100:.1f}%",
+                "비중 오차": f"{weight_diff*100:+.1f}%",
+                "진단": "⚠️ 이탈" if is_out_of_band else "✅ 정상",
+                "액션 플랜": action
+            })
+
+        st.dataframe(pd.DataFrame(results), use_container_width=True, hide_index=True)
+        
+        # 밴드 룰에 따른 종합 판단
+        if needs_rebalancing:
+            st.error("🚨 5% 이상 비중이 틀어진 자산이 있습니다. 위 액션 플랜에 따라 즉시 매매를 진행하세요.")
+        else:
+            st.success("🎉 모든 자산이 5% 오차범위 내에 있습니다. 이번 달은 매매 없이 유지(Hold)를 권장합니다.")
